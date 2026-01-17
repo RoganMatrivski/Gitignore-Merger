@@ -1,0 +1,33 @@
+// Project-local debug tasks
+//
+// For more documentation on how to configure debug tasks,
+// see: https://zed.dev/docs/debugger
+[
+  {
+    "adapter": "CodeLLDB",
+    "label": "Debug with flags",
+    "request": "launch",
+    "program": "/var/home/roganmatrivski/gitrepos/rust/gitignore-merger/target/debug/gitignore-merger",
+    "args": ["-vvv", "~/gitrepos"],
+    "cwd": "/var/home/roganmatrivski/gitrepos/rust/gitignore-merger",
+    "build": {
+      "label": "cargo run -p gitignore-merger",
+      "command": "cargo",
+      "args": ["build", "--package", "gitignore-merger"],
+      "env": {
+        "RUSTC_TOOLCHAIN": "/var/home/roganmatrivski/.rustup/toolchains/stable-x86_64-unknown-linux-gnu",
+      },
+      "cwd": "/var/home/roganmatrivski/gitrepos/rust/gitignore-merger",
+      "use_new_terminal": false,
+      "allow_concurrent_runs": false,
+      "reveal": "always",
+      "reveal_target": "dock",
+      "hide": "never",
+      "tags": [],
+      "shell": "system",
+      "show_summary": false,
+      "show_command": false,
+    },
+    "sourceLanguages": ["rust"],
+  },
+]
