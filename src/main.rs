@@ -1,108 +1,92 @@
 use std::path::{Path, PathBuf};
 
 use color_eyre::Report;
-use eyre::ContextCompat;
+use strum::IntoEnumIterator;
 
+use init::OutputFormat;
+
+mod gitignore;
 mod init;
+mod syncthing;
 
-// Avoid musl's default allocator due to lackluster performance
-// https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
 #[cfg(target_env = "musl")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[tracing::instrument]
 fn main() -> Result<(), Report> {
-    let args = init::initialize()?;
+    let mut args = init::initialize()?;
 
-    let paths = if let Some(p) = args.path {
-        p
-    } else {
-        vec![PathBuf::from(".")]
-    };
+    // If launched without a terminal (e.g. double-clicked in Explorer),
+    // detect which format to use from the exe filename and override the default.
+    // Works by iterating OutputFormat variants and checking if the exe stem
+    // contains the variant's lowercase name — adding a new variant is enough
+    // to extend this.
+    if let Some(detected) = detect_format_from_exe() {
+        args.formats = vec![detected];
+    }
 
-    for p in paths {
-        let paths = gitignore_getter(&p)?;
-        let gitignore_contents = paths
-            .iter()
-            .map(|x| gitignore_read(x, &p))
-            .collect::<eyre::Result<Vec<_>>>()?
-            .join("\n")
-            + "\n";
+    let roots: Vec<PathBuf> = args.path.take().unwrap_or_else(|| vec![PathBuf::from(".")]);
 
-        let output_file = p.join(&args.name);
-
-        println!("Will write to \"{}\":", output_file.to_string_lossy());
-        println!("{gitignore_contents}");
-
-        if args.dry_run {
-            tracing::debug!("Dry run specified. Skipping writing to file...");
-            continue;
-        }
-
-        if args.no_overwrite && std::fs::exists(&output_file).is_ok() {
-            tracing::warn!(
-                "Output file \"{}\" already exists. Skipping writing to file...",
-                output_file.to_string_lossy()
-            );
-            continue;
-        }
-
-        std::fs::write(output_file, gitignore_contents)?;
+    for root in &roots {
+        process_root(root, &args)?;
     }
 
     Ok(())
 }
 
-fn gitignore_read(file: impl AsRef<Path>, rootdir: impl AsRef<Path>) -> eyre::Result<String> {
-    let filepath = file.as_ref();
-    let rootdir = rootdir.as_ref();
-    let filestr = std::fs::read_to_string(filepath)?;
-
-    let filedir = filepath
-        .parent()
-        .context("file should have a parent directory")?;
-
-    let relative_path = filedir.strip_prefix(rootdir).unwrap_or(&filedir);
-
-    let filelines = filestr
-        .lines()
-        .filter(|x| !x.starts_with("#"))
-        .map(|l| {
-            let stripped = l.trim_start_matches('/');
-
-            relative_path.join(stripped)
-        })
-        .collect::<Vec<_>>();
-
-    let joined = filelines
-        .iter()
-        .map(|x| x.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    Ok(joined)
+fn detect_format_from_exe() -> Option<OutputFormat> {
+    let exe = std::env::current_exe().ok()?;
+    let stem = exe.file_stem()?.to_string_lossy().to_lowercase();
+    OutputFormat::iter().find(|fmt| stem.contains(&fmt.to_string()))
 }
 
-fn gitignore_getter(srcdir: &Path) -> eyre::Result<Vec<std::path::PathBuf>> {
-    use std::ffi::OsStr;
-    use walkdir::WalkDir;
+fn process_root(root: &Path, args: &init::Args) -> eyre::Result<()> {
+    let gitignore_files = gitignore::find_gitignores(root)?;
 
-    let mut paths = vec![];
+    let rules: Vec<gitignore::PrefixedRule> = gitignore_files
+        .iter()
+        .map(|p| gitignore::read_gitignore(p, root))
+        .collect::<eyre::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
-    for entry in WalkDir::new(srcdir).min_depth(2) {
-        let e = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                tracing::error!("Error walking directory: {:?}", e);
-                continue;
+    for fmt in &args.formats {
+        match fmt {
+            OutputFormat::Gitignore => {
+                let content = gitignore::merge_to_gitignore(&rules);
+                let dest = root.join(&args.name);
+                write_output(&dest, &content, args.dry_run, args.no_overwrite)?;
             }
-        };
-
-        if e.file_name() == OsStr::new(".gitignore") {
-            paths.push(e.into_path());
+            OutputFormat::Syncthing => {
+                let content = syncthing::merge_to_stignore(&rules);
+                let dest = root.join(&args.stignore_name);
+                write_output(&dest, &content, args.dry_run, args.no_overwrite)?;
+            }
         }
     }
 
-    Ok(paths)
+    Ok(())
+}
+
+fn write_output(dest: &Path, content: &str, dry_run: bool, no_overwrite: bool) -> eyre::Result<()> {
+    println!("Will write to \"{}\":", dest.to_string_lossy());
+    println!("{content}");
+
+    if dry_run {
+        tracing::debug!("Dry run specified. Skipping write to file...");
+        return Ok(());
+    }
+
+    if no_overwrite && dest.exists() {
+        tracing::warn!(
+            "Output file \"{}\" already exists. Skipping write...",
+            dest.to_string_lossy()
+        );
+        return Ok(());
+    }
+
+    std::fs::write(dest, content)?;
+    Ok(())
 }

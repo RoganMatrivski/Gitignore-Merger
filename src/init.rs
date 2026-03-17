@@ -1,7 +1,15 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use color_eyre::Report;
+use strum::{Display, EnumIter};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, EnumIter, Display)]
+#[strum(serialize_all = "lowercase")]
+pub enum OutputFormat {
+    Gitignore,
+    Syncthing,
+}
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -10,17 +18,27 @@ pub struct Args {
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Verbosity log
+    /// Dry run — print what would be written without touching the filesystem
     #[arg(short, long)]
     pub dry_run: bool,
 
-    /// Verbosity log
+    /// Skip writing if the output file already exists
     #[arg(long)]
     pub no_overwrite: bool,
 
-    /// Filename to write into
+    /// Output filename for the merged gitignore
     #[arg(short, long, default_value = ".gitignore")]
     pub name: String,
+
+    /// Output filename for the Syncthing ignore file
+    #[arg(long, default_value = ".stignore")]
+    pub stignore_name: String,
+
+    /// Which format(s) to write — pass multiple times for more than one
+    /// e.g. `--format gitignore --format syncthing`
+    /// Defaults to gitignore only.
+    #[arg(short, long, default_values = ["gitignore"])]
+    pub formats: Vec<OutputFormat>,
 
     /// Path to get
     pub path: Option<Vec<PathBuf>>,
@@ -33,6 +51,7 @@ macro_rules! pkg_name {
         env!("CARGO_PKG_NAME").replace('-', "_")
     };
 }
+
 pub fn initialize() -> Result<Args, Report> {
     use tracing_error::ErrorLayer;
     use tracing_subscriber::prelude::*;
@@ -49,7 +68,6 @@ pub fn initialize() -> Result<Args, Report> {
         .map(|i| VERBOSE_LEVELS[i as usize])
         .unwrap_or("warn");
 
-    // Try to build from RUST_LOG, or fall back to a base "warn"
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("warn"))
         .add_directive(format!("{}={}", pkg_name!(), crate_level).parse().unwrap());
