@@ -1,6 +1,6 @@
 [package]
 name = "gitignore-merger"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["roganmatrivski"]
 edition = "2021"
 repository = "https://github.com/RoganMatrivski/Gitignore-Merger"
