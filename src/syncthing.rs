@@ -21,7 +21,13 @@ use crate::gitignore::PrefixedRule;
 ///
 /// Returns `None` for rules that have no meaningful stignore representation.
 pub fn prefixed_rule_to_stignore(r: &PrefixedRule) -> Option<String> {
-    let prefix = r.relative_dir.to_string_lossy();
+    // let prefix = r.relative_dir.to_string_lossy();
+    let prefix = r
+        .relative_dir
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
     let stripped = r.rule.pattern.trim_start_matches('/');
 
     // Build the path-prefixed pattern
