@@ -13,6 +13,7 @@ pub struct Rule {
     pub dir_only: bool,
 }
 
+#[allow(unused)]
 impl Rule {
     /// Parse a single non-comment, non-blank gitignore line into a `Rule`.
     pub fn parse(line: &str) -> Option<Self> {
