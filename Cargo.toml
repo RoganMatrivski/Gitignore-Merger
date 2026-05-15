@@ -31,7 +31,12 @@ ignore = "0.4.25"
 [profile.dev.package.backtrace]
 opt-level = 3
 
-# The profile that 'dist' will build with
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [profile.dist]
 inherits = "release"
-lto = "thin"
