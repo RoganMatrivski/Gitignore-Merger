@@ -45,32 +45,18 @@ fn detect_format_from_exe() -> Option<OutputFormat> {
 }
 
 fn process_root(root: &Path, args: &init::Args) -> eyre::Result<()> {
-    // ------------------------------------------------------------------
-    // 1. Load the fingerprint cache stored at root/_dir-processor-cache.json
-    // ------------------------------------------------------------------
+    // 1. Load fingerprint + rule cache
     let mut cache = cache::Cache::load(root)?;
 
-    // ------------------------------------------------------------------
-    // 2. Walk the tree and detect what changed since last run.
-    //
-    //    walk_cached touches every directory but only does cheap stat
-    //    calls (read_dir + metadata).  No file contents are read here.
-    // ------------------------------------------------------------------
+    // 2. Walk tree — fingerprint dirs, diff against cache, collect rules.
+    //    On a fully clean run this is just stat calls + cache deserialization.
+    //    read_gitignore is only called for dirs whose deep_fp changed.
     let outcome = walker::walk_cached(root, &mut cache)?;
 
-    // ------------------------------------------------------------------
-    // 3. Persist the updated fingerprints immediately so even a later
-    //    crash doesn't leave the cache stale.
-    // ------------------------------------------------------------------
+    // 3. Persist updated cache immediately
     cache.save()?;
 
-    // ------------------------------------------------------------------
-    // 4. Skip all output generation if nothing changed.
-    //
-    //    This is the main win: on a clean re-run the whole process_root
-    //    returns here in milliseconds instead of re-reading every
-    //    gitignore in the tree.
-    // ------------------------------------------------------------------
+    // 4. Nothing changed → done, no output to write
     if !outcome.any_changed {
         println!("[{}] Nothing changed — skipping", root.display());
         return Ok(());
@@ -82,27 +68,8 @@ fn process_root(root: &Path, args: &init::Args) -> eyre::Result<()> {
         outcome.changed_dirs.len()
     );
 
-    for changed in &outcome.changed_dirs {
-        tracing::debug!("  {}", changed.display());
-    }
-
-    // ------------------------------------------------------------------
-    // 5. Something changed — run the existing gitignore processing.
-    //
-    //    The original logic is untouched: find all gitignores, merge
-    //    rules, write output.  A future optimisation could re-read only
-    //    the changed subtrees (outcome.changed_dirs), but the full merge
-    //    is fast enough for most projects.
-    // ------------------------------------------------------------------
-    let gitignore_files = gitignore::find_gitignores(root)?;
-
-    let rules: Vec<gitignore::PrefixedRule> = gitignore_files
-        .iter()
-        .map(|p| gitignore::read_gitignore(p, root))
-        .collect::<eyre::Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+    // 5. Rules are already collected by the walker — no extra find/read pass needed
+    let rules = outcome.rules;
 
     for fmt in &args.formats {
         match fmt {
@@ -123,8 +90,8 @@ fn process_root(root: &Path, args: &init::Args) -> eyre::Result<()> {
 }
 
 fn write_output(dest: &Path, content: &str, dry_run: bool, no_overwrite: bool) -> eyre::Result<()> {
-    println!("Will write to \"{}\":", dest.to_string_lossy());
-    println!("{content}");
+    // println!("Will write to \"{}\":", dest.to_string_lossy());
+    // println!("{content}");
 
     if dry_run {
         tracing::debug!("Dry run specified. Skipping write to file...");

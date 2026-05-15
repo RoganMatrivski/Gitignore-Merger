@@ -1,39 +1,38 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use eyre::ContextCompat;
+use ignore::{DirEntry, Error, ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
+
+// ---------------------------------------------------------------------------
+// Rule types  (unchanged from original)
+// ---------------------------------------------------------------------------
 
 /// A single gitignore rule with its path context stripped of comments/blanks.
 #[derive(Debug, Clone)]
 pub struct Rule {
-    /// The raw pattern text (e.g. `*.log`, `!keep.log`, `/build`)
     pub pattern: String,
-    /// True when the line starts with `!` (negation rule)
     pub negated: bool,
-    /// True when the pattern explicitly targets only directories (trailing `/`)
     pub dir_only: bool,
 }
 
 #[allow(unused)]
 impl Rule {
-    /// Parse a single non-comment, non-blank gitignore line into a `Rule`.
     pub fn parse(line: &str) -> Option<Self> {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             return None;
         }
-
         let (negated, rest) = if let Some(s) = line.strip_prefix('!') {
             (true, s)
         } else {
             (false, line)
         };
-
         let (dir_only, pattern) = if rest.ends_with('/') {
             (true, rest.trim_end_matches('/').to_string())
         } else {
             (false, rest.to_string())
         };
-
         Some(Rule {
             pattern,
             negated,
@@ -41,7 +40,6 @@ impl Rule {
         })
     }
 
-    /// Reconstruct the canonical gitignore line for this rule.
     pub fn to_gitignore_line(&self) -> String {
         let mut s = String::new();
         if self.negated {
@@ -55,31 +53,26 @@ impl Rule {
     }
 }
 
-/// A `Rule` that has been prefixed with its path relative to the repo root.
+/// A `Rule` prefixed with its path relative to the repo root.
 #[derive(Debug, Clone)]
 pub struct PrefixedRule {
     pub rule: Rule,
-    /// Relative directory that owns the originating `.gitignore`, e.g. `src/foo`
     pub relative_dir: PathBuf,
 }
 
 impl PrefixedRule {
-    /// Produce the final gitignore-compatible line with path prefix applied.
     pub fn to_gitignore_line(&self) -> String {
         let prefix = self.relative_dir.to_string_lossy();
         let stripped = self.rule.pattern.trim_start_matches('/');
-
         let prefixed_pattern = if prefix.is_empty() {
             stripped.to_string()
         } else {
             format!("{}/{}", prefix, stripped)
         };
-
         let mut s = String::new();
         if self.rule.negated {
             s.push('!');
         }
-        // Always anchor with `/` when we have a concrete path prefix
         if !prefix.is_empty() {
             s.push('/');
         }
@@ -92,35 +85,85 @@ impl PrefixedRule {
 }
 
 // ---------------------------------------------------------------------------
+// Generic parallel file-collector visitor  (replaces FindVisitor/FindVisitorBuilder)
+//
+// Both the walker (fingerprinting pass) and find_gitignores reuse this.
+// Give it a filename to match, get back a Vec<PathBuf> of every hit.
+// ---------------------------------------------------------------------------
+
+pub struct FileCollectorBuilder {
+    target: &'static str,
+    results: Arc<Mutex<Vec<PathBuf>>>,
+}
+
+pub struct FileCollectorVisitor {
+    target: &'static str,
+    results: Arc<Mutex<Vec<PathBuf>>>,
+}
+
+impl FileCollectorBuilder {
+    pub fn new(target: &'static str) -> (Self, Arc<Mutex<Vec<PathBuf>>>) {
+        let results = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                target,
+                results: Arc::clone(&results),
+            },
+            results.clone(),
+        )
+    }
+}
+
+impl<'s> ParallelVisitorBuilder<'s> for FileCollectorBuilder {
+    fn build(&mut self) -> Box<dyn ParallelVisitor + 's> {
+        Box::new(FileCollectorVisitor {
+            target: self.target,
+            results: Arc::clone(&self.results),
+        })
+    }
+}
+
+impl ParallelVisitor for FileCollectorVisitor {
+    fn visit(&mut self, entry: Result<DirEntry, Error>) -> WalkState {
+        if let Ok(e) = entry {
+            if e.file_name() == self.target {
+                self.results.lock().unwrap().push(e.into_path());
+            }
+        }
+        WalkState::Continue
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Recursively find all `.gitignore` files under `srcdir`, skipping the root
-/// level (depth 1) so the output file is never included in its own source.
+/// Recursively find all `.gitignore` files under `srcdir` (min depth 2).
+/// Uses the shared `FileCollectorBuilder` visitor.
 pub fn find_gitignores(srcdir: &Path) -> eyre::Result<Vec<PathBuf>> {
-    use std::ffi::OsStr;
-    use walkdir::WalkDir;
+    let (mut builder, results) = FileCollectorBuilder::new(".gitignore");
 
-    let mut paths = Vec::new();
+    WalkBuilder::new(srcdir)
+        .min_depth(Some(2))
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .build_parallel()
+        .visit(&mut builder);
 
-    for entry in WalkDir::new(srcdir).min_depth(2) {
-        let e = match entry {
-            Ok(e) => e,
-            Err(err) => {
-                tracing::error!("Error walking directory: {:?}", err);
-                continue;
-            }
-        };
+    drop(builder);
 
-        if e.file_name() == OsStr::new(".gitignore") {
-            paths.push(e.into_path());
-        }
-    }
+    let paths = Arc::try_unwrap(results)
+        .map_err(|_| eyre::eyre!("results Arc still has multiple owners"))?
+        .into_inner()?;
 
+    tracing::debug!(count = paths.len(), ".gitignore files found");
     Ok(paths)
 }
 
 /// Read a single `.gitignore` file and return its rules with path context.
+/// Called only on cache misses — cached dirs skip this entirely.
 pub fn read_gitignore(file: &Path, rootdir: &Path) -> eyre::Result<Vec<PrefixedRule>> {
     let contents = std::fs::read_to_string(file)?;
 
